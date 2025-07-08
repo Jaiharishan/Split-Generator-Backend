@@ -2,6 +2,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const { runQuery, getQuery, allQuery } = require('../database');
 const { authenticateToken } = require('../middleware/auth');
+const PremiumService = require('../services/premiumService');
 
 const router = express.Router();
 
@@ -99,6 +100,15 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields: title and participants' });
     }
     
+    // Check if user can create a new bill
+    const canCreateBill = await PremiumService.canCreateBill(req.user.id);
+    if (!canCreateBill) {
+      return res.status(403).json({ 
+        error: 'Monthly bill limit reached',
+        message: 'Upgrade to premium for unlimited bills'
+      });
+    }
+    
     // Calculate total amount if not provided
     const calculatedTotal = total_amount || 0;
     
@@ -109,6 +119,9 @@ router.post('/', async (req, res) => {
       'INSERT INTO bills (id, user_id, title, total_amount, description) VALUES (?, ?, ?, ?, ?)',
       [billId, req.user.id, title, calculatedTotal, description || null]
     );
+    
+    // Increment bill count for the month
+    await PremiumService.incrementBillCount(req.user.id);
     
     // Create participants
     const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'];

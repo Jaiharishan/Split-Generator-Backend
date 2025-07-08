@@ -18,6 +18,15 @@ function initializeDatabase() {
           provider TEXT DEFAULT 'local',
           provider_id TEXT,
           email_verified BOOLEAN DEFAULT FALSE,
+          subscription_status TEXT DEFAULT 'free',
+          subscription_plan TEXT DEFAULT 'free',
+          subscription_expires_at DATETIME,
+          stripe_customer_id TEXT,
+          stripe_subscription_id TEXT,
+          bills_created_this_month INTEGER DEFAULT 0,
+          bills_limit INTEGER DEFAULT 3,
+          participants_limit INTEGER DEFAULT 5,
+          templates_limit INTEGER DEFAULT 2,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -140,6 +149,61 @@ function initializeDatabase() {
       // Add description column to bills table if it doesn't exist (migration)
       db.run('ALTER TABLE bills ADD COLUMN description TEXT', (err) => {
         // Ignore error if column already exists
+        if (err && !err.message.includes('duplicate column name')) {
+          console.warn('Migration warning:', err.message);
+        }
+      });
+
+      // Add premium subscription fields to users table (migration)
+      db.run('ALTER TABLE users ADD COLUMN subscription_status TEXT DEFAULT "free"', (err) => {
+        if (err && !err.message.includes('duplicate column name')) {
+          console.warn('Migration warning:', err.message);
+        }
+      });
+
+      db.run('ALTER TABLE users ADD COLUMN subscription_plan TEXT DEFAULT "free"', (err) => {
+        if (err && !err.message.includes('duplicate column name')) {
+          console.warn('Migration warning:', err.message);
+        }
+      });
+
+      db.run('ALTER TABLE users ADD COLUMN subscription_expires_at DATETIME', (err) => {
+        if (err && !err.message.includes('duplicate column name')) {
+          console.warn('Migration warning:', err.message);
+        }
+      });
+
+      db.run('ALTER TABLE users ADD COLUMN stripe_customer_id TEXT', (err) => {
+        if (err && !err.message.includes('duplicate column name')) {
+          console.warn('Migration warning:', err.message);
+        }
+      });
+
+      db.run('ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT', (err) => {
+        if (err && !err.message.includes('duplicate column name')) {
+          console.warn('Migration warning:', err.message);
+        }
+      });
+
+      db.run('ALTER TABLE users ADD COLUMN bills_created_this_month INTEGER DEFAULT 0', (err) => {
+        if (err && !err.message.includes('duplicate column name')) {
+          console.warn('Migration warning:', err.message);
+        }
+      });
+
+      db.run('ALTER TABLE users ADD COLUMN bills_limit INTEGER DEFAULT 3', (err) => {
+        if (err && !err.message.includes('duplicate column name')) {
+          console.warn('Migration warning:', err.message);
+        }
+      });
+
+      db.run('ALTER TABLE users ADD COLUMN participants_limit INTEGER DEFAULT 5', (err) => {
+        if (err && !err.message.includes('duplicate column name')) {
+          console.warn('Migration warning:', err.message);
+        }
+      });
+
+      db.run('ALTER TABLE users ADD COLUMN templates_limit INTEGER DEFAULT 2', (err) => {
         if (err && !err.message.includes('duplicate column name')) {
           console.warn('Migration warning:', err.message);
         }

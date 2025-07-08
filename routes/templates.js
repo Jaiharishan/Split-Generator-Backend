@@ -2,6 +2,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const { runQuery, getQuery, allQuery } = require('../database');
 const { authenticateToken } = require('../middleware/auth');
+const PremiumService = require('../services/premiumService');
 
 const router = express.Router();
 
@@ -57,6 +58,15 @@ router.post('/', authenticateToken, async (req, res) => {
 
     if (!name || !participants || !Array.isArray(participants)) {
       return res.status(400).json({ error: 'Name and participants array are required' });
+    }
+
+    // Check if user can create a new template
+    const canCreateTemplate = await PremiumService.canCreateTemplate(req.user.id);
+    if (!canCreateTemplate) {
+      return res.status(403).json({ 
+        error: 'Template limit reached',
+        message: 'Upgrade to premium for unlimited templates'
+      });
     }
 
     const templateId = uuidv4();

@@ -10,6 +10,7 @@ const authRoutes = require('./routes/auth');
 const billRoutes = require('./routes/bills');
 const uploadRoutes = require('./routes/upload');
 const templateRoutes = require('./routes/templates');
+const premiumRoutes = require('./routes/premium');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -50,6 +51,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/bills', billRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/templates', templateRoutes);
+app.use('/api/premium', premiumRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
