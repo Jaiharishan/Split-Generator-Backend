@@ -10,7 +10,7 @@ const authRoutes = require('./routes/auth');
 const billRoutes = require('./routes/bills');
 const uploadRoutes = require('./routes/upload');
 const templateRoutes = require('./routes/templates');
-const premiumRoutes = require('./routes/premium');
+const { router: premiumRoutes, webhookRouter } = require('./routes/premium');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -37,6 +37,9 @@ app.use(cors({
     : ['http://localhost:3000'],
   credentials: true
 }));
+
+// Stripe webhook route (must be before express.json!)
+app.use('/api/stripe', webhookRouter);
 
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));

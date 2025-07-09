@@ -3,6 +3,55 @@ const router = express.Router();
 const { authenticateToken } = require('../middleware/auth');
 const PremiumService = require('../services/premiumService');
 
+// Stripe integration for premium checkout
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
+// Stripe webhook endpoint
+const expressRaw = require('express').raw;
+
+// Attach this route separately in index.js with raw body parsing
+const webhookRouter = express.Router();
+
+webhookRouter.post('/webhook', expressRaw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error('Stripe webhook signature verification failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // Handle the event
+  switch (event.type) {
+    case 'checkout.session.completed': {
+      const session = event.data.object;
+      const userId = session.client_reference_id;
+      if (userId) {
+        // Set user as premium in DB
+        try {
+          await PremiumService.updateSubscription(userId, {
+            status: 'premium',
+            plan: session.mode === 'subscription' && session.display_items && session.display_items[0]?.plan?.interval === 'year' ? 'yearly' : 'monthly',
+            expiresAt: null, // Optionally set based on Stripe subscription
+            stripeCustomerId: session.customer,
+            stripeSubscriptionId: session.subscription
+          });
+          console.log(`User ${userId} upgraded to premium via Stripe.`);
+        } catch (err) {
+          console.error('Failed to update user after Stripe checkout:', err);
+        }
+      }
+      break;
+    }
+    // TODO: Handle customer.subscription.updated, .deleted, etc.
+    default:
+      // Unhandled event type
+      break;
+  }
+  res.json({ received: true });
+});
+
 // Get user's subscription status and limits
 router.get('/status', authenticateToken, async (req, res) => {
   try {
@@ -120,6 +169,40 @@ router.post('/cancel', authenticateToken, async (req, res) => {
   }
 });
 
+// Create Stripe Checkout session for premium subscription
+router.post('/create-checkout-session', authenticateToken, async (req, res) => {
+  try {
+    const { plan } = req.body; // 'monthly' or 'yearly'
+    let priceId;
+    if (plan === 'yearly') {
+      priceId = process.env.STRIPE_PRICE_ID_YEARLY;
+    } else {
+      priceId = process.env.STRIPE_PRICE_ID_MONTHLY;
+    }
+    if (!priceId) {
+      return res.status(400).json({ success: false, message: 'Invalid plan or Stripe price ID not set' });
+    }
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      mode: 'subscription',
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+      customer_email: req.user.email,
+      client_reference_id: req.user.id,
+      success_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/premium?success=true`,
+      cancel_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/premium?canceled=true`,
+    });
+    res.json({ success: true, url: session.url });
+  } catch (error) {
+    console.error('Error creating Stripe Checkout session:', error);
+    res.status(500).json({ success: false, message: 'Failed to create checkout session' });
+  }
+});
+
 // Get premium plans
 router.get('/plans', (req, res) => {
   const plans = [
@@ -192,4 +275,4 @@ router.get('/plans', (req, res) => {
   });
 });
 
-module.exports = router; 
+module.exports = { router, webhookRouter }; 
