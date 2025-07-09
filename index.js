@@ -6,11 +6,7 @@ const path = require('path');
 const cookieParser = require('cookie-parser');
 require('dotenv').config();
 const { initializeDatabase } = require('./database');
-const authRoutes = require('./routes/auth');
-const billRoutes = require('./routes/bills');
-const uploadRoutes = require('./routes/upload');
-const templateRoutes = require('./routes/templates');
-const { router: premiumRoutes, webhookRouter } = require('./routes/premium');
+const { router, webhookRouter } = require('./routes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -50,11 +46,7 @@ app.use(cookieParser());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/bills', billRoutes);
-app.use('/api/upload', uploadRoutes);
-app.use('/api/templates', templateRoutes);
-app.use('/api/premium', premiumRoutes);
+app.use('/api', router);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
