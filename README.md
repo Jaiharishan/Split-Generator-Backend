@@ -1,36 +1,30 @@
 # Split Generator – Backend
 
-Split Generator is a full-stack web app for splitting grocery bills and group expenses. The backend provides secure APIs for user authentication, bill management, OCR processing, and data persistence. It is built with Node.js, Express, SQLite, and integrates Tesseract.js for OCR.
-
----
-
-## 🌟 Product Overview
-
-**Split Generator** helps users split grocery and group bills by uploading e-bills or receipt images, extracting products, and assigning costs to participants. The backend powers all core logic, authentication, and data storage.
+Split Generator is a full-stack web app for splitting grocery bills and group expenses. The backend provides secure APIs for user authentication, bill management, OCR processing, analytics, notifications, and premium features. Built with Node.js, Express, Prisma, and PostgreSQL (Supabase).
 
 ---
 
 ## 🚀 Backend Features
-
-- **User Authentication**: Email/password login, Google OAuth, session management
+- **User Authentication**: Email/password login, Google OAuth
 - **Bill Management**: Create, update, delete, and list bills (user-specific)
-- **Product & Participant Management**: Store products, assign to participants, calculate totals
-- **Templates**: Save and reuse participant groups for quick bill creation
-- **Bill Export**: Generate downloadable bill summaries
-- **OCR Processing**: Extract text and products from uploaded images and PDFs using Tesseract.js and PDF.js
-- **API Security**: Auth middleware, user-specific data isolation
+- **Product & Participant Management**: Assign products, calculate totals
+- **Templates**: Save/reuse participant groups
+- **Analytics**: Premium users get spending charts, top participants, and more
+- **Premium**: Stripe-powered subscriptions, usage limits, upgrades
+- **Notifications**: Email notifications for events, user preferences
+- **OCR Processing**: Extract text/products from images (Tesseract.js)
+- **API Security**: JWT auth, user-specific data isolation
 
 ---
 
 ## 🛠️ Tech Stack
-
-- **Node.js** (Express server)
-- **SQLite** (persistent database)
-- **Tesseract.js** (OCR for images)
-- **PDF.js** (PDF parsing)
-- **Passport.js** (authentication, Google OAuth)
-- **Multer** (file uploads)
-- **CORS** (secure cross-origin requests)
+- **Node.js** (Express)
+- **Prisma** (ORM)
+- **PostgreSQL** (Supabase)
+- **Stripe** (subscriptions)
+- **Nodemailer** (email)
+- **Tesseract.js** (OCR)
+- **Multer** (uploads)
 
 ---
 
@@ -46,72 +40,62 @@ npm install
 Create a `.env` file in the `server` folder:
 ```
 PORT=5000
-SESSION_SECRET=your_secret_here
-GOOGLE_CLIENT_ID=your_google_client_id
-GOOGLE_CLIENT_SECRET=your_google_client_secret
-GOOGLE_CALLBACK_URL=http://localhost:5000/api/auth/google/callback
+DATABASE_URL=postgresql://...
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your@email.com
+SMTP_PASS=your-app-password
+FRONTEND_URL=http://localhost:3000
 ```
 
-### 3. Start the backend
+### 3. Run migrations
 ```bash
-npm start
+npx prisma migrate deploy
 ```
-The server will run at [http://localhost:5000](http://localhost:5000)
+
+### 4. Start the backend
+```bash
+npm run dev
+```
 
 ---
 
-## 🔑 Authentication
-- Register/login with email & password
-- Google OAuth login supported
-- Sessions managed with secure cookies
-- All bill data is user-specific
-
----
-
-## 🧾 API Overview
-
-- `POST /api/auth/register` – Register new user
+## 📝 API Overview (Highlights)
+- `POST /api/auth/register` – Register
 - `POST /api/auth/login` – Login
-- `GET /api/auth/google` – Google OAuth login
-- `GET /api/bills` – List user bills
-- `POST /api/bills` – Create new bill
-- `GET /api/bills/:id` – Get bill details
-- `PUT /api/bills/:id` – Update bill
-- `DELETE /api/bills/:id` – Delete bill
-- `POST /api/ocr` – Process uploaded receipt (image/PDF)
-- `GET /api/templates` – List templates
-- `POST /api/templates` – Create template
-- `POST /api/bills/:id/export` – Export bill summary
-
-All routes (except `/auth/*`) require authentication.
+- `GET /api/bills` – List bills
+- `POST /api/bills` – Create bill
+- `GET /api/analytics/overview` – Analytics (premium)
+- `GET /api/notifications/preferences` – Get notification prefs
+- `PUT /api/notifications/preferences` – Update notification prefs
+- `POST /api/premium/upgrade` – Upgrade to premium
+- `POST /api/upload/image` – Upload receipt
 
 ---
 
-## 🗂️ Project Structure
+## 🗄️ Database
+- **Prisma schema** in `prisma/schema.prisma`
+- Managed by Prisma migrations
+- Uses Supabase/Postgres in production
+
+---
+
+## 🏗️ Project Structure
 - `index.js` – Main server entry point
-- `db.js` – SQLite database setup
-- `routes/` – Express route handlers (auth, bills, ocr, templates, export)
-- `middleware/` – Auth and session middleware
-- `ocr/` – OCR and parsing utilities
-
----
-
-## 🔗 Frontend Integration
-- The backend serves as the API for the React frontend (see `client/README.md`)
-- CORS is enabled for local development
-- All authentication and session cookies are HTTP-only for security
+- `prisma/` – Prisma schema and migrations
+- `routes/` – Express route handlers
+- `middleware/` – Auth middleware
+- `services/` – Business logic (premium, notifications, etc.)
+- `uploads/` – Uploaded images
 
 ---
 
 ## 🤝 Contributing
-Pull requests and suggestions are welcome! Please open an issue for major changes.
+Pull requests and suggestions are welcome!
 
 ---
 
 ## 📄 License
-MIT License. See main repo for details.
-
----
-
-## 💡 About
-Split Generator backend is designed for reliability, security, and easy integration with modern web frontends. Built to make group expense splitting seamless and accurate. 
+MIT License. See main repo for details. 

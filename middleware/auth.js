@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const { getQuery } = require('../database');
+const prisma = require('../prismaClient');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
@@ -14,14 +14,14 @@ const authenticateToken = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    
-    // Get user from database
-    const user = await getQuery('SELECT id, email, name, avatar_url, provider FROM users WHERE id = ?', [decoded.userId]);
-    
+    // Get user from database using Prisma
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+      select: { id: true, email: true, name: true, avatar_url: true, provider: true },
+    });
     if (!user) {
       return res.status(401).json({ error: 'Invalid token' });
     }
-
     req.user = user;
     next();
   } catch (error) {
@@ -42,12 +42,14 @@ const optionalAuth = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    const user = await getQuery('SELECT id, email, name, avatar_url, provider FROM users WHERE id = ?', [decoded.userId]);
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+      select: { id: true, email: true, name: true, avatar_url: true, provider: true },
+    });
     req.user = user || null;
   } catch (error) {
     req.user = null;
   }
-  
   next();
 };
 

@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const { authenticateToken } = require('../middleware/auth');
 const PremiumService = require('../services/premiumService');
-const { getQuery } = require('../database');
 const notificationService = require('../services/notificationService');
 
 // Stripe integration for premium checkout
@@ -388,10 +387,7 @@ router.post('/upgrade', authenticateToken, async (req, res) => {
 router.post('/cancel', authenticateToken, async (req, res) => {
   try {
     // Get user's current subscription info
-    const user = await getQuery(
-      'SELECT stripe_subscription_id, subscription_status FROM users WHERE id = ?',
-      [req.user.id]
-    );
+    const user = await PremiumService.getUserByStripeCustomerId(req.user.id);
 
     if (!user || user.subscription_status !== 'premium') {
       return res.status(400).json({ 

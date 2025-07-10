@@ -1,16 +1,19 @@
 const express = require('express');
 const router = express.Router();
 const { authenticateToken } = require('../middleware/auth');
-const { getQuery, runQuery } = require('../database');
+const prisma = require('../prismaClient');
 const notificationService = require('../services/notificationService');
 
 // Get user's notification preferences
 router.get('/preferences', authenticateToken, async (req, res) => {
   try {
-    const user = await getQuery(
-      'SELECT email_notifications, notification_preferences FROM users WHERE id = ?',
-      [req.user.id]
-    );
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: {
+        email_notifications: true,
+        notification_preferences: true,
+      },
+    });
 
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
@@ -45,10 +48,10 @@ router.put('/preferences', authenticateToken, async (req, res) => {
   try {
     const { emailNotifications, preferences } = req.body;
 
-    const currentUser = await getQuery(
-      'SELECT notification_preferences FROM users WHERE id = ?',
-      [req.user.id]
-    );
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { notification_preferences: true },
+    });
 
     if (!currentUser) {
       return res.status(404).json({ success: false, message: 'User not found' });
@@ -57,10 +60,13 @@ router.put('/preferences', authenticateToken, async (req, res) => {
     const currentPreferences = currentUser.notification_preferences ? JSON.parse(currentUser.notification_preferences) : {};
     const updatedPreferences = { ...currentPreferences, ...preferences };
 
-    await runQuery(
-      'UPDATE users SET email_notifications = ?, notification_preferences = ? WHERE id = ?',
-      [emailNotifications, JSON.stringify(updatedPreferences), req.user.id]
-    );
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data: {
+        email_notifications: emailNotifications,
+        notification_preferences: JSON.stringify(updatedPreferences),
+      },
+    });
 
     res.json({
       success: true,
@@ -79,10 +85,10 @@ router.put('/preferences', authenticateToken, async (req, res) => {
 // Send test email
 router.post('/test-email', authenticateToken, async (req, res) => {
   try {
-    const user = await getQuery(
-      'SELECT name, email, email_notifications FROM users WHERE id = ?',
-      [req.user.id]
-    );
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { name: true, email: true, email_notifications: true },
+    });
 
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });

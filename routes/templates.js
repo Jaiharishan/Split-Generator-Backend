@@ -1,6 +1,6 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
-const { runQuery, getQuery, allQuery } = require('../database');
+const prisma = require('../prismaClient');
 const { authenticateToken } = require('../middleware/auth');
 const PremiumService = require('../services/premiumService');
 
@@ -9,18 +9,19 @@ const router = express.Router();
 // Get all templates for the authenticated user
 router.get('/', authenticateToken, async (req, res) => {
   try {
-    const templates = await allQuery(
-      `SELECT bt.*, 
-              COUNT(tp.id) as participant_count
-       FROM bill_templates bt
-       LEFT JOIN template_participants tp ON bt.id = tp.template_id
-       WHERE bt.user_id = ?
-       GROUP BY bt.id
-       ORDER BY bt.updated_at DESC`,
-      [req.user.id]
-    );
-
-    res.json({ templates });
+    const templates = await prisma.billTemplate.findMany({
+      where: { user_id: req.user.id },
+      orderBy: { updated_at: 'desc' },
+      include: {
+        participants: true,
+      },
+    });
+    // Add participant_count for each template
+    const templatesWithCounts = templates.map(template => ({
+      ...template,
+      participant_count: template.participants.length,
+    }));
+    res.json({ templates: templatesWithCounts });
   } catch (error) {
     console.error('Error fetching templates:', error);
     res.status(500).json({ error: 'Failed to fetch templates' });
@@ -30,21 +31,14 @@ router.get('/', authenticateToken, async (req, res) => {
 // Get a specific template with participants
 router.get('/:id', authenticateToken, async (req, res) => {
   try {
-    const template = await getQuery(
-      'SELECT * FROM bill_templates WHERE id = ? AND user_id = ?',
-      [req.params.id, req.user.id]
-    );
-
+    const template = await prisma.billTemplate.findFirst({
+      where: { id: req.params.id, user_id: req.user.id },
+      include: { participants: { orderBy: { created_at: 'asc' } } },
+    });
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
     }
-
-    const participants = await allQuery(
-      'SELECT * FROM template_participants WHERE template_id = ? ORDER BY created_at',
-      [req.params.id]
-    );
-
-    res.json({ template: { ...template, participants } });
+    res.json({ template });
   } catch (error) {
     console.error('Error fetching template:', error);
     res.status(500).json({ error: 'Failed to fetch template' });
@@ -55,51 +49,46 @@ router.get('/:id', authenticateToken, async (req, res) => {
 router.post('/', authenticateToken, async (req, res) => {
   try {
     const { name, description, participants } = req.body;
-
     if (!name || !participants || !Array.isArray(participants)) {
       return res.status(400).json({ error: 'Name and participants array are required' });
     }
-
     // Check if user can create a new template
     const canCreateTemplate = await PremiumService.canCreateTemplate(req.user.id);
     if (!canCreateTemplate) {
-      return res.status(403).json({ 
+      return res.status(403).json({
         error: 'Template limit reached',
-        message: 'Upgrade to premium for unlimited templates'
+        message: 'Upgrade to premium for unlimited templates',
       });
     }
-
     const templateId = uuidv4();
-    
     // Create template
-    await runQuery(
-      'INSERT INTO bill_templates (id, user_id, name, description) VALUES (?, ?, ?, ?)',
-      [templateId, req.user.id, name, description]
-    );
-
+    await prisma.billTemplate.create({
+      data: {
+        id: templateId,
+        user_id: req.user.id,
+        name,
+        description,
+      },
+    });
     // Add participants
     for (const participant of participants) {
-      const participantId = uuidv4();
-      await runQuery(
-        'INSERT INTO template_participants (id, template_id, name, color) VALUES (?, ?, ?, ?)',
-        [participantId, templateId, participant.name, participant.color]
-      );
+      await prisma.templateParticipant.create({
+        data: {
+          id: uuidv4(),
+          template_id: templateId,
+          name: participant.name,
+          color: participant.color,
+        },
+      });
     }
-
     // Fetch the created template with participants
-    const template = await getQuery(
-      'SELECT * FROM bill_templates WHERE id = ?',
-      [templateId]
-    );
-
-    const templateParticipants = await allQuery(
-      'SELECT * FROM template_participants WHERE template_id = ? ORDER BY created_at',
-      [templateId]
-    );
-
-    res.status(201).json({ 
-      template: { ...template, participants: templateParticipants },
-      message: 'Template created successfully' 
+    const template = await prisma.billTemplate.findFirst({
+      where: { id: templateId },
+      include: { participants: { orderBy: { created_at: 'asc' } } },
+    });
+    res.status(201).json({
+      template,
+      message: 'Template created successfully',
     });
   } catch (error) {
     console.error('Error creating template:', error);
@@ -111,51 +100,37 @@ router.post('/', authenticateToken, async (req, res) => {
 router.put('/:id', authenticateToken, async (req, res) => {
   try {
     const { name, description, participants } = req.body;
-    const templateId = req.params.id;
-
-    // Check if template exists and belongs to user
-    const existingTemplate = await getQuery(
-      'SELECT * FROM bill_templates WHERE id = ? AND user_id = ?',
-      [templateId, req.user.id]
-    );
-
-    if (!existingTemplate) {
-      return res.status(404).json({ error: 'Template not found' });
-    }
-
+    const { id } = req.params;
     // Update template
-    await runQuery(
-      'UPDATE bill_templates SET name = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [name, description, templateId]
-    );
-
-    // Delete existing participants
-    await runQuery('DELETE FROM template_participants WHERE template_id = ?', [templateId]);
-
-    // Add new participants
-    for (const participant of participants) {
-      const participantId = uuidv4();
-      await runQuery(
-        'INSERT INTO template_participants (id, template_id, name, color) VALUES (?, ?, ?, ?)',
-        [participantId, templateId, participant.name, participant.color]
-      );
-    }
-
-    // Fetch updated template
-    const template = await getQuery(
-      'SELECT * FROM bill_templates WHERE id = ?',
-      [templateId]
-    );
-
-    const templateParticipants = await allQuery(
-      'SELECT * FROM template_participants WHERE template_id = ? ORDER BY created_at',
-      [templateId]
-    );
-
-    res.json({ 
-      template: { ...template, participants: templateParticipants },
-      message: 'Template updated successfully' 
+    await prisma.billTemplate.update({
+      where: { id, user_id: req.user.id },
+      data: {
+        name,
+        description,
+        updated_at: new Date(),
+      },
     });
+    if (participants && Array.isArray(participants)) {
+      // Remove existing participants
+      await prisma.templateParticipant.deleteMany({ where: { template_id: id } });
+      // Add new participants
+      for (const participant of participants) {
+        await prisma.templateParticipant.create({
+          data: {
+            id: uuidv4(),
+            template_id: id,
+            name: participant.name,
+            color: participant.color,
+          },
+        });
+      }
+    }
+    // Fetch updated template
+    const template = await prisma.billTemplate.findFirst({
+      where: { id },
+      include: { participants: { orderBy: { created_at: 'asc' } } },
+    });
+    res.json({ template, message: 'Template updated successfully' });
   } catch (error) {
     console.error('Error updating template:', error);
     res.status(500).json({ error: 'Failed to update template' });
@@ -165,21 +140,8 @@ router.put('/:id', authenticateToken, async (req, res) => {
 // Delete a template
 router.delete('/:id', authenticateToken, async (req, res) => {
   try {
-    const templateId = req.params.id;
-
-    // Check if template exists and belongs to user
-    const existingTemplate = await getQuery(
-      'SELECT * FROM bill_templates WHERE id = ? AND user_id = ?',
-      [templateId, req.user.id]
-    );
-
-    if (!existingTemplate) {
-      return res.status(404).json({ error: 'Template not found' });
-    }
-
-    // Delete template (participants will be deleted due to CASCADE)
-    await runQuery('DELETE FROM bill_templates WHERE id = ?', [templateId]);
-
+    const { id } = req.params;
+    await prisma.billTemplate.delete({ where: { id, user_id: req.user.id } });
     res.json({ message: 'Template deleted successfully' });
   } catch (error) {
     console.error('Error deleting template:', error);
@@ -192,41 +154,39 @@ router.post('/:id/apply', authenticateToken, async (req, res) => {
   try {
     const templateId = req.params.id;
     const { title, total_amount, description } = req.body;
-
     // Get template with participants
-    const template = await getQuery(
-      'SELECT * FROM bill_templates WHERE id = ? AND user_id = ?',
-      [templateId, req.user.id]
-    );
-
+    const template = await prisma.billTemplate.findFirst({
+      where: { id: templateId, user_id: req.user.id },
+      include: { participants: { orderBy: { created_at: 'asc' } } },
+    });
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
     }
-
-    const participants = await allQuery(
-      'SELECT * FROM template_participants WHERE template_id = ? ORDER BY created_at',
-      [templateId]
-    );
-
     // Create new bill
     const billId = uuidv4();
-    await runQuery(
-      'INSERT INTO bills (id, user_id, title, total_amount, description) VALUES (?, ?, ?, ?, ?)',
-      [billId, req.user.id, title, total_amount, description]
-    );
-
+    await prisma.bill.create({
+      data: {
+        id: billId,
+        user_id: req.user.id,
+        title,
+        total_amount,
+        description,
+      },
+    });
     // Copy participants from template to bill
-    for (const participant of participants) {
-      const newParticipantId = uuidv4();
-      await runQuery(
-        'INSERT INTO participants (id, bill_id, name, color) VALUES (?, ?, ?, ?)',
-        [newParticipantId, billId, participant.name, participant.color]
-      );
+    for (const participant of template.participants) {
+      await prisma.participant.create({
+        data: {
+          id: uuidv4(),
+          bill_id: billId,
+          name: participant.name,
+          color: participant.color,
+        },
+      });
     }
-
-    res.status(201).json({ 
+    res.status(201).json({
       billId,
-      message: 'Bill created from template successfully' 
+      message: 'Bill created from template successfully',
     });
   } catch (error) {
     console.error('Error applying template:', error);

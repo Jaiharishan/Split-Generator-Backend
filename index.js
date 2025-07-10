@@ -5,7 +5,6 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const cookieParser = require('cookie-parser');
 require('dotenv').config();
-const { initializeDatabase } = require('./database');
 const { router, webhookRouter } = require('./routes');
 
 const app = express();
@@ -70,9 +69,7 @@ app.use('*', (req, res) => {
 // Initialize database and start server
 async function startServer() {
   try {
-    await initializeDatabase();
-    console.log('Database initialized successfully');
-    
+    // No database initialization needed for Prisma/Postgres
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
       console.log(`Health check: http://localhost:${PORT}/api/health`);

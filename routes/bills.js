@@ -1,6 +1,6 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
-const { runQuery, getQuery, allQuery } = require('../database');
+const prisma = require('../prismaClient');
 const { authenticateToken } = require('../middleware/auth');
 const PremiumService = require('../services/premiumService');
 
@@ -12,20 +12,21 @@ router.use(authenticateToken);
 // Get all bills for the authenticated user
 router.get('/', async (req, res) => {
   try {
-    const bills = await allQuery(`
-      SELECT 
-        b.*,
-        COUNT(DISTINCT p.id) as participant_count,
-        COUNT(DISTINCT pr.id) as product_count
-      FROM bills b
-      LEFT JOIN participants p ON b.id = p.bill_id
-      LEFT JOIN products pr ON b.id = pr.bill_id
-      WHERE b.user_id = ?
-      GROUP BY b.id
-      ORDER BY b.created_at DESC
-    `, [req.user.id]);
-    
-    res.json(bills);
+    const bills = await prisma.bill.findMany({
+      where: { user_id: req.user.id },
+      orderBy: { created_at: 'desc' },
+      include: {
+        participants: true,
+        products: true,
+      },
+    });
+    // Add participant_count and product_count for each bill
+    const billsWithCounts = bills.map(bill => ({
+      ...bill,
+      participant_count: bill.participants.length,
+      product_count: bill.products.length,
+    }));
+    res.json(billsWithCounts);
   } catch (error) {
     console.error('Error fetching bills:', error);
     res.status(500).json({ error: 'Failed to fetch bills' });
@@ -36,54 +37,39 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    
     // Get bill details (ensure it belongs to the user)
-    const bill = await getQuery('SELECT * FROM bills WHERE id = ? AND user_id = ?', [id, req.user.id]);
+    const bill = await prisma.bill.findFirst({
+      where: { id, user_id: req.user.id },
+      include: {
+        participants: true,
+        products: {
+          include: {
+            productParticipants: {
+              include: {
+                participant: true,
+              },
+            },
+          },
+        },
+      },
+    });
     if (!bill) {
       return res.status(404).json({ error: 'Bill not found' });
     }
-    
-    // Get participants
-    const participants = await allQuery('SELECT * FROM participants WHERE bill_id = ? ORDER BY created_at', [id]);
-    
-    // Get products with their participant assignments
-    const products = await allQuery(`
-      SELECT 
-        p.*,
-        GROUP_CONCAT(pp.participant_id) as participant_ids,
-        GROUP_CONCAT(pp.share_percentage) as share_percentages
-      FROM products p
-      LEFT JOIN product_participants pp ON p.id = pp.product_id
-      WHERE p.bill_id = ?
-      GROUP BY p.id
-      ORDER BY p.created_at
-    `, [id]);
-    
-    // Process products to include participant details
-    const processedProducts = products.map(product => ({
+    // Format products to match old structure
+    const processedProducts = bill.products.map(product => ({
       ...product,
-      participant_ids: product.participant_ids ? product.participant_ids.split(',') : [],
-      share_percentages: product.share_percentages ? product.share_percentages.split(',').map(Number) : [],
-      participants: []
+      participant_ids: product.productParticipants.map(pp => pp.participant_id),
+      share_percentages: product.productParticipants.map(pp => pp.share_percentage),
+      participants: product.productParticipants.map(pp => ({
+        ...pp,
+        name: pp.participant.name,
+        color: pp.participant.color,
+      })),
     }));
-    
-    // Add participant details to each product
-    for (let product of processedProducts) {
-      if (product.participant_ids.length > 0) {
-        const productParticipants = await allQuery(`
-          SELECT pp.*, p.name, p.color
-          FROM product_participants pp
-          JOIN participants p ON pp.participant_id = p.id
-          WHERE pp.product_id = ?
-        `, [product.id]);
-        product.participants = productParticipants;
-      }
-    }
-    
     res.json({
       ...bill,
-      participants,
-      products: processedProducts
+      products: processedProducts,
     });
   } catch (error) {
     console.error('Error fetching bill:', error);
@@ -115,10 +101,15 @@ router.post('/', async (req, res) => {
     const billId = uuidv4();
     
     // Create bill with user_id
-    await runQuery(
-      'INSERT INTO bills (id, user_id, title, total_amount, description) VALUES (?, ?, ?, ?, ?)',
-      [billId, req.user.id, title, calculatedTotal, description || null]
-    );
+    await prisma.bill.create({
+      data: {
+        id: billId,
+        user_id: req.user.id,
+        title,
+        total_amount: calculatedTotal,
+        description: description || null,
+      },
+    });
     
     // Increment bill count for the month
     await PremiumService.incrementBillCount(req.user.id);
@@ -130,10 +121,14 @@ router.post('/', async (req, res) => {
       const participantId = uuidv4();
       const color = colors[i % colors.length];
       
-      await runQuery(
-        'INSERT INTO participants (id, bill_id, name, color) VALUES (?, ?, ?, ?)',
-        [participantId, billId, participants[i], color]
-      );
+      await prisma.participant.create({
+        data: {
+          id: participantId,
+          bill_id: billId,
+          name: participants[i],
+          color,
+        },
+      });
     }
     
     res.status(201).json({ 
@@ -152,12 +147,17 @@ router.put('/:id', async (req, res) => {
     const { id } = req.params;
     const { title, total_amount, description } = req.body;
     
-    const result = await runQuery(
-      'UPDATE bills SET title = ?, total_amount = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?',
-      [title, total_amount, description, id, req.user.id]
-    );
+    const result = await prisma.bill.update({
+      where: { id, user_id: req.user.id },
+      data: {
+        title,
+        total_amount,
+        description,
+        updated_at: new Date(),
+      },
+    });
     
-    if (result.changes === 0) {
+    if (!result) {
       return res.status(404).json({ error: 'Bill not found' });
     }
     
@@ -173,9 +173,11 @@ router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     
-    const result = await runQuery('DELETE FROM bills WHERE id = ? AND user_id = ?', [id, req.user.id]);
+    const result = await prisma.bill.delete({
+      where: { id, user_id: req.user.id },
+    });
     
-    if (result.changes === 0) {
+    if (!result) {
       return res.status(404).json({ error: 'Bill not found' });
     }
     
@@ -197,7 +199,9 @@ router.post('/:id/products', async (req, res) => {
     }
     
     // Verify bill belongs to user
-    const bill = await getQuery('SELECT id FROM bills WHERE id = ? AND user_id = ?', [id, req.user.id]);
+    const bill = await prisma.bill.findFirst({
+      where: { id, user_id: req.user.id },
+    });
     if (!bill) {
       return res.status(404).json({ error: 'Bill not found' });
     }
@@ -205,18 +209,27 @@ router.post('/:id/products', async (req, res) => {
     const productId = uuidv4();
     
     // Create product
-    await runQuery(
-      'INSERT INTO products (id, bill_id, name, price, quantity) VALUES (?, ?, ?, ?, ?)',
-      [productId, id, name, price, quantity]
-    );
+    await prisma.product.create({
+      data: {
+        id: productId,
+        bill_id: id,
+        name,
+        price,
+        quantity,
+      },
+    });
     
     // Assign participants to product
     for (const participantId of participant_ids) {
       const sharePercentage = 100 / participant_ids.length;
-      await runQuery(
-        'INSERT INTO product_participants (id, product_id, participant_id, share_percentage) VALUES (?, ?, ?, ?)',
-        [uuidv4(), productId, participantId, sharePercentage]
-      );
+      await prisma.productParticipant.create({
+        data: {
+          id: uuidv4(),
+          product_id: productId,
+          participant_id: participantId,
+          share_percentage: sharePercentage,
+        },
+      });
     }
     
     res.status(201).json({ 
@@ -236,29 +249,41 @@ router.put('/:billId/products/:productId', async (req, res) => {
     const { name, price, quantity, participant_ids } = req.body;
     
     // Verify bill belongs to user
-    const bill = await getQuery('SELECT id FROM bills WHERE id = ? AND user_id = ?', [billId, req.user.id]);
+    const bill = await prisma.bill.findFirst({
+      where: { id: billId, user_id: req.user.id },
+    });
     if (!bill) {
       return res.status(404).json({ error: 'Bill not found' });
     }
     
     // Update product
-    await runQuery(
-      'UPDATE products SET name = ?, price = ?, quantity = ? WHERE id = ? AND bill_id = ?',
-      [name, price, quantity, productId, billId]
-    );
+    await prisma.product.update({
+      where: { id: productId, bill_id: billId },
+      data: {
+        name,
+        price,
+        quantity,
+      },
+    });
     
     // Update participant assignments
     if (participant_ids) {
       // Remove existing assignments
-      await runQuery('DELETE FROM product_participants WHERE product_id = ?', [productId]);
+      await prisma.productParticipant.deleteMany({
+        where: { product_id: productId },
+      });
       
       // Add new assignments
       for (const participantId of participant_ids) {
         const sharePercentage = 100 / participant_ids.length;
-        await runQuery(
-          'INSERT INTO product_participants (id, product_id, participant_id, share_percentage) VALUES (?, ?, ?, ?)',
-          [uuidv4(), productId, participantId, sharePercentage]
-        );
+        await prisma.productParticipant.create({
+          data: {
+            id: uuidv4(),
+            product_id: productId,
+            participant_id: participantId,
+            share_percentage: sharePercentage,
+          },
+        });
       }
     }
     
@@ -275,17 +300,18 @@ router.delete('/:billId/products/:productId', async (req, res) => {
     const { billId, productId } = req.params;
     
     // Verify bill belongs to user
-    const bill = await getQuery('SELECT id FROM bills WHERE id = ? AND user_id = ?', [billId, req.user.id]);
+    const bill = await prisma.bill.findFirst({
+      where: { id: billId, user_id: req.user.id },
+    });
     if (!bill) {
       return res.status(404).json({ error: 'Bill not found' });
     }
     
-    const result = await runQuery(
-      'DELETE FROM products WHERE id = ? AND bill_id = ?',
-      [productId, billId]
-    );
+    const result = await prisma.product.delete({
+      where: { id: productId, bill_id: billId },
+    });
     
-    if (result.changes === 0) {
+    if (!result) {
       return res.status(404).json({ error: 'Product not found' });
     }
     
@@ -302,35 +328,79 @@ router.get('/:id/summary', async (req, res) => {
     const { id } = req.params;
     
     // Verify bill belongs to user
-    const bill = await getQuery('SELECT id FROM bills WHERE id = ? AND user_id = ?', [id, req.user.id]);
+    const bill = await prisma.bill.findFirst({
+      where: { id, user_id: req.user.id },
+    });
     if (!bill) {
       return res.status(404).json({ error: 'Bill not found' });
     }
     
     // Get participants with their totals
-    const summary = await allQuery(`
-      SELECT 
-        p.id,
-        p.name,
-        p.color,
-        COALESCE(SUM(pr.price * pr.quantity * pp.share_percentage / 100), 0) as total_amount,
-        COUNT(DISTINCT pr.id) as items_count
-      FROM participants p
-      LEFT JOIN product_participants pp ON p.id = pp.participant_id
-      LEFT JOIN products pr ON pp.product_id = pr.id AND pr.bill_id = ?
-      WHERE p.bill_id = ?
-      GROUP BY p.id, p.name, p.color
-      ORDER BY p.created_at
-    `, [id, id]);
+    const summary = await prisma.participant.findMany({
+      where: { bill_id: id },
+      include: {
+        productParticipants: {
+          include: {
+            product: true,
+          },
+        },
+      },
+      orderBy: { created_at: 'asc' },
+    });
     
     // Get bill total
-    const billData = await getQuery('SELECT total_amount FROM bills WHERE id = ?', [id]);
-    
-    res.json({
-      bill_total: billData?.total_amount || 0,
-      participants: summary,
-      calculated_total: summary.reduce((sum, p) => sum + p.total_amount, 0)
+    const billData = await prisma.bill.findFirst({
+      where: { id },
+      select: { total_amount: true },
     });
+    
+    // Calculate totals for each participant
+    const participantTotals = {};
+    summary.forEach(participant => {
+      participantTotals[participant.id] = 0;
+    });
+    
+    summary.forEach(participant => {
+      participant.productParticipants.forEach(pp => {
+        const totalProductCost = pp.product.price * pp.product.quantity;
+        const totalSharePercentage = pp.product.productParticipants.reduce((sum, p) => sum + p.share_percentage, 0);
+        
+        participantTotals[participant.id] += (totalProductCost * pp.share_percentage) / totalSharePercentage;
+      });
+    });
+    
+    // Generate export data
+    const exportData = {
+      bill: {
+        ...bill,
+        created_at: new Date(bill.created_at).toLocaleDateString(),
+        total_amount: parseFloat(bill.total_amount).toFixed(2)
+      },
+      participants: summary.map(p => ({
+        ...p,
+        total_owed: parseFloat(participantTotals[p.id] || 0).toFixed(2)
+      })),
+      products: summary.flatMap(participant => 
+        participant.productParticipants.map(pp => ({
+          ...pp.product,
+          price: parseFloat(pp.product.price).toFixed(2),
+          total_cost: parseFloat(pp.product.price * pp.product.quantity).toFixed(2),
+          participants: pp.product.productParticipants.map(ppp => ({
+            ...ppp,
+            share_amount: parseFloat((pp.product.price * pp.product.quantity * ppp.share_percentage) / 
+              pp.product.productParticipants.reduce((sum, p) => sum + p.share_percentage, 0)).toFixed(2)
+          }))
+        }))
+      ),
+      summary: {
+        total_items: summary.flatMap(p => p.productParticipants).length,
+        total_participants: summary.length,
+        total_amount: parseFloat(bill.total_amount).toFixed(2),
+        generated_at: new Date().toLocaleString()
+      }
+    };
+    
+    res.json(exportData);
   } catch (error) {
     console.error('Error fetching bill summary:', error);
     res.status(500).json({ error: 'Failed to fetch bill summary' });
@@ -343,45 +413,70 @@ router.get('/:id/export', async (req, res) => {
     const { id } = req.params;
     
     // Get bill details (ensure it belongs to the user)
-    const bill = await getQuery('SELECT * FROM bills WHERE id = ? AND user_id = ?', [id, req.user.id]);
+    const bill = await prisma.bill.findFirst({
+      where: { id, user_id: req.user.id },
+      include: {
+        participants: true,
+        products: {
+          include: {
+            productParticipants: {
+              include: {
+                participant: true,
+              },
+            },
+          },
+        },
+      },
+    });
     if (!bill) {
       return res.status(404).json({ error: 'Bill not found' });
     }
     
     // Get participants
-    const participants = await allQuery('SELECT * FROM participants WHERE bill_id = ? ORDER BY created_at', [id]);
+    const participants = await prisma.participant.findMany({
+      where: { bill_id: id },
+      orderBy: { created_at: 'asc' },
+    });
     
     // Get products with their participant assignments
-    const products = await allQuery(`
-      SELECT 
-        p.*,
-        GROUP_CONCAT(pp.participant_id) as participant_ids,
-        GROUP_CONCAT(pp.share_percentage) as share_percentages
-      FROM products p
-      LEFT JOIN product_participants pp ON p.id = pp.product_id
-      WHERE p.bill_id = ?
-      GROUP BY p.id
-      ORDER BY p.created_at
-    `, [id]);
+    const products = await prisma.product.findMany({
+      where: { bill_id: id },
+      include: {
+        productParticipants: {
+          include: {
+            participant: true,
+          },
+        },
+      },
+      orderBy: { created_at: 'asc' },
+    });
     
     // Process products to include participant details
     const processedProducts = products.map(product => ({
       ...product,
-      participant_ids: product.participant_ids ? product.participant_ids.split(',') : [],
-      share_percentages: product.share_percentages ? product.share_percentages.split(',').map(Number) : [],
-      participants: []
+      participant_ids: product.productParticipants.map(pp => pp.participant_id),
+      share_percentages: product.productParticipants.map(pp => pp.share_percentage),
+      participants: product.productParticipants.map(pp => ({
+        ...pp,
+        name: pp.participant.name,
+        color: pp.participant.color,
+      })),
     }));
     
     // Add participant details to each product
     for (let product of processedProducts) {
       if (product.participant_ids.length > 0) {
-        const productParticipants = await allQuery(`
-          SELECT pp.*, p.name, p.color
-          FROM product_participants pp
-          JOIN participants p ON pp.participant_id = p.id
-          WHERE pp.product_id = ?
-        `, [product.id]);
-        product.participants = productParticipants;
+        const productParticipants = await prisma.productParticipant.findMany({
+          where: { product_id: product.id },
+          include: {
+            participant: true,
+          },
+        });
+        product.participants = productParticipants.map(pp => ({
+          ...pp,
+          name: pp.participant.name,
+          color: pp.participant.color,
+        }));
       }
     }
     

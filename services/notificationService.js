@@ -1,5 +1,5 @@
 const nodemailer = require('nodemailer');
-const { getQuery } = require('../database');
+const prisma = require('../prismaClient');
 
 class NotificationService {
   constructor() {
@@ -81,17 +81,30 @@ class NotificationService {
   // Check if user wants to receive specific notification type
   async shouldSendNotification(userId, notificationType) {
     try {
-      const user = await getQuery(
-        'SELECT email_notifications, notification_preferences FROM users WHERE id = ?',
-        [userId]
-      );
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          email_notifications: true,
+          notification_preferences: true,
+        },
+      });
 
       if (!user || !user.email_notifications) {
         return false;
       }
 
-      const preferences = user.notification_preferences ? JSON.parse(user.notification_preferences) : {};
-      
+      let preferences = {};
+      if (user.notification_preferences) {
+        if (typeof user.notification_preferences === 'string') {
+          try {
+            preferences = JSON.parse(user.notification_preferences);
+          } catch (e) {
+            preferences = {};
+          }
+        } else if (typeof user.notification_preferences === 'object') {
+          preferences = user.notification_preferences;
+        }
+      }
       // Default to true if preference is not explicitly set to false
       return preferences[notificationType] !== false;
     } catch (error) {
@@ -262,7 +275,10 @@ class NotificationService {
       return;
     }
 
-    const user = await getQuery('SELECT name, email FROM users WHERE id = ?', [userId]);
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, email: true },
+    });
     if (!user) return;
 
     await this.sendEmail(user.email, 'welcome', {
@@ -275,7 +291,10 @@ class NotificationService {
       return;
     }
 
-    const user = await getQuery('SELECT name, email FROM users WHERE id = ?', [userId]);
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, email: true },
+    });
     if (!user) return;
 
     await this.sendEmail(user.email, 'trialEnding', {
@@ -289,7 +308,10 @@ class NotificationService {
       return;
     }
 
-    const user = await getQuery('SELECT name, email FROM users WHERE id = ?', [userId]);
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, email: true },
+    });
     if (!user) return;
 
     await this.sendEmail(user.email, 'paymentFailed', {
@@ -303,7 +325,10 @@ class NotificationService {
       return;
     }
 
-    const user = await getQuery('SELECT name, email FROM users WHERE id = ?', [userId]);
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, email: true },
+    });
     if (!user) return;
 
     await this.sendEmail(user.email, 'subscriptionCancelled', {
@@ -317,7 +342,10 @@ class NotificationService {
       return;
     }
 
-    const user = await getQuery('SELECT name, email FROM users WHERE id = ?', [userId]);
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, email: true },
+    });
     if (!user) return;
 
     await this.sendEmail(user.email, 'billShared', {
@@ -331,7 +359,10 @@ class NotificationService {
       return;
     }
 
-    const user = await getQuery('SELECT name, email FROM users WHERE id = ?', [userId]);
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, email: true },
+    });
     if (!user) return;
 
     await this.sendEmail(user.email, 'paymentReminder', {
@@ -345,7 +376,10 @@ class NotificationService {
       return;
     }
 
-    const user = await getQuery('SELECT name, email FROM users WHERE id = ?', [userId]);
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, email: true },
+    });
     if (!user) return;
 
     await this.sendEmail(user.email, 'usageAlert', {
@@ -359,7 +393,10 @@ class NotificationService {
       return;
     }
 
-    const user = await getQuery('SELECT name, email FROM users WHERE id = ?', [userId]);
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, email: true },
+    });
     if (!user) return;
 
     await this.sendEmail(user.email, 'subscriptionUpgraded', {
@@ -369,10 +406,10 @@ class NotificationService {
 
   // Batch notification methods
   async sendBulkNotifications(userIds, templateName, data = {}) {
-    const users = await getQuery(
-      'SELECT id, name, email FROM users WHERE id IN (' + userIds.map(() => '?').join(',') + ')',
-      userIds
-    );
+    const users = await prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, name: true, email: true },
+    });
 
     const promises = users.map(user => 
       this.sendEmail(user.email, templateName, { name: user.name, ...data })

@@ -1,7 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
-const { runQuery, getQuery } = require('../database');
+const prisma = require('../prismaClient');
 const { generateToken } = require('../middleware/auth');
 const notificationService = require('../services/notificationService');
 
@@ -17,7 +17,7 @@ router.post('/register', async (req, res) => {
     }
 
     // Check if user already exists
-    const existingUser = await getQuery('SELECT id FROM users WHERE email = ?', [email]);
+    const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser) {
       return res.status(409).json({ error: 'User with this email already exists' });
     }
@@ -28,19 +28,24 @@ router.post('/register', async (req, res) => {
 
     // Create user
     const userId = uuidv4();
-    await runQuery(
-      'INSERT INTO users (id, email, password_hash, name, provider) VALUES (?, ?, ?, ?, ?)',
-      [userId, email, passwordHash, name, 'local']
-    );
+    await prisma.user.create({
+      data: {
+        id: userId,
+        email,
+        password_hash: passwordHash,
+        name,
+        provider: 'local',
+      },
+    });
 
     // Generate token
     const token = generateToken(userId);
 
     // Get user data (without password)
-    const user = await getQuery(
-      'SELECT id, email, name, avatar_url, provider, created_at FROM users WHERE id = ?',
-      [userId]
-    );
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true, name: true, avatar_url: true, provider: true, created_at: true },
+    });
 
     // Send welcome email (non-blocking)
     try {
@@ -71,10 +76,7 @@ router.post('/login', async (req, res) => {
     }
 
     // Get user with password hash
-    const user = await getQuery(
-      'SELECT id, email, password_hash, name, avatar_url, provider FROM users WHERE email = ?',
-      [email]
-    );
+    const user = await prisma.user.findUnique({ where: { email } });
 
     if (!user) {
       return res.status(401).json({ error: 'Invalid email or password' });
@@ -90,12 +92,12 @@ router.post('/login', async (req, res) => {
     const token = generateToken(user.id);
 
     // Remove password hash from response
-    delete user.password_hash;
+    const { password_hash, ...userWithoutPassword } = user;
 
     res.json({
       message: 'Login successful',
       token,
-      user
+      user: userWithoutPassword
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -113,35 +115,38 @@ router.post('/oauth/callback', async (req, res) => {
     }
 
     // Check if user exists with this provider
-    let user = await getQuery(
-      'SELECT id, email, name, avatar_url, provider FROM users WHERE provider = ? AND provider_id = ?',
-      [provider, providerId]
-    );
+    let user = await prisma.user.findFirst({ where: { provider, provider_id: providerId } });
 
     if (!user) {
       // Check if user exists with this email
-      user = await getQuery(
-        'SELECT id, email, name, avatar_url, provider FROM users WHERE email = ?',
-        [email]
-      );
+      user = await prisma.user.findUnique({ where: { email } });
 
       if (user) {
         // Update existing user with OAuth provider info
-        await runQuery(
-          'UPDATE users SET provider = ?, provider_id = ?, avatar_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-          [provider, providerId, avatarUrl || user.avatar_url, user.id]
-        );
+        await prisma.user.update({
+          where: { id: user.id },
+          data: {
+            provider,
+            provider_id: providerId,
+            avatar_url: avatarUrl || user.avatar_url,
+            updated_at: new Date(),
+          },
+        });
       } else {
         // Create new user
         const userId = uuidv4();
-        await runQuery(
-          'INSERT INTO users (id, email, name, avatar_url, provider, provider_id, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          [userId, email, name, avatarUrl, provider, providerId, true]
-        );
-        user = await getQuery(
-          'SELECT id, email, name, avatar_url, provider FROM users WHERE id = ?',
-          [userId]
-        );
+        await prisma.user.create({
+          data: {
+            id: userId,
+            email,
+            name,
+            avatar_url: avatarUrl,
+            provider,
+            provider_id: providerId,
+            email_verified: true,
+          },
+        });
+        user = await prisma.user.findUnique({ where: { id: userId } });
       }
     }
 
@@ -173,10 +178,10 @@ router.get('/me', async (req, res) => {
     const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
     
     const decoded = jwt.verify(token, JWT_SECRET);
-    const user = await getQuery(
-      'SELECT id, email, name, avatar_url, provider, created_at FROM users WHERE id = ?',
-      [decoded.userId]
-    );
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+      select: { id: true, email: true, name: true, avatar_url: true, provider: true, created_at: true },
+    });
 
     if (!user) {
       return res.status(401).json({ error: 'Invalid token' });
@@ -211,10 +216,10 @@ router.post('/change-password', async (req, res) => {
     const decoded = jwt.verify(token, JWT_SECRET);
     
     // Get user with password hash
-    const user = await getQuery(
-      'SELECT id, password_hash FROM users WHERE id = ?',
-      [decoded.userId]
-    );
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+      select: { password_hash: true },
+    });
 
     if (!user) {
       return res.status(401).json({ error: 'Invalid token' });
@@ -231,10 +236,13 @@ router.post('/change-password', async (req, res) => {
     const newPasswordHash = await bcrypt.hash(newPassword, saltRounds);
 
     // Update password
-    await runQuery(
-      'UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [newPasswordHash, user.id]
-    );
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        password_hash: newPasswordHash,
+        updated_at: new Date(),
+      },
+    });
 
     res.json({ message: 'Password changed successfully' });
   } catch (error) {

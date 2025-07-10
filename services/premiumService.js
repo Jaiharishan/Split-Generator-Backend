@@ -1,67 +1,73 @@
-const { getQuery, runQuery } = require('../database');
+const prisma = require('../prismaClient');
 
 class PremiumService {
   // Check if user has premium subscription
   static async isPremium(userId) {
-    const user = await getQuery(
-      'SELECT subscription_status, subscription_expires_at FROM users WHERE id = ?',
-      [userId]
-    );
-    
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        subscription_status: true,
+        subscription_expires_at: true,
+      },
+    });
     if (!user) return false;
-    
-    // Check if subscription is active and not expired
     if (user.subscription_status === 'premium') {
-      if (!user.subscription_expires_at) return true; // No expiration date
+      if (!user.subscription_expires_at) return true;
       return new Date(user.subscription_expires_at) > new Date();
     }
-    
     return false;
   }
 
   // Get user's current usage and limits
   static async getUserLimits(userId) {
-    const user = await getQuery(
-      `SELECT 
-        subscription_status,
-        subscription_plan,
-        bills_created_this_month,
-        bills_limit,
-        participants_limit,
-        templates_limit
-       FROM users WHERE id = ?`,
-      [userId]
-    );
-
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        subscription_status: true,
+        subscription_plan: true,
+        bills_limit: true,
+        participants_limit: true,
+        templates_limit: true,
+      },
+    });
     if (!user) return null;
 
     // Get current counts
-    const billsCount = await getQuery(
-      'SELECT COUNT(*) as count FROM bills WHERE user_id = ? AND strftime("%Y-%m", created_at) = strftime("%Y-%m", "now")',
-      [userId]
-    );
-
-    const templatesCount = await getQuery(
-      'SELECT COUNT(*) as count FROM bill_templates WHERE user_id = ?',
-      [userId]
-    );
-
+    // Bills created this month
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth() + 1;
+    const monthStart = new Date(year, month - 1, 1);
+    const monthEnd = new Date(year, month, 1);
+    const billsCount = await prisma.bill.count({
+      where: {
+        user_id: userId,
+        created_at: {
+          gte: monthStart,
+          lt: monthEnd,
+        },
+      },
+    });
+    // Templates count
+    const templatesCount = await prisma.billTemplate.count({
+      where: { user_id: userId },
+    });
     return {
       subscription_status: user.subscription_status,
       subscription_plan: user.subscription_plan,
       bills: {
-        created_this_month: billsCount?.count || 0,
+        created_this_month: billsCount,
         limit: user.bills_limit,
-        remaining: Math.max(0, user.bills_limit - (billsCount?.count || 0))
+        remaining: Math.max(0, user.bills_limit - billsCount),
       },
       participants: {
-        limit: user.participants_limit
+        limit: user.participants_limit,
       },
       templates: {
-        count: templatesCount?.count || 0,
+        count: templatesCount,
         limit: user.templates_limit,
-        remaining: Math.max(0, user.templates_limit - (templatesCount?.count || 0))
-      }
+        remaining: Math.max(0, user.templates_limit - templatesCount),
+      },
     };
   }
 
@@ -69,11 +75,7 @@ class PremiumService {
   static async canCreateBill(userId) {
     const limits = await this.getUserLimits(userId);
     if (!limits) return false;
-
-    // Premium users have unlimited bills
     if (limits.subscription_status === 'premium') return true;
-
-    // Free users check monthly limit
     return limits.bills.remaining > 0;
   }
 
@@ -81,11 +83,7 @@ class PremiumService {
   static async canAddParticipants(userId, currentCount) {
     const limits = await this.getUserLimits(userId);
     if (!limits) return false;
-
-    // Premium users have unlimited participants
     if (limits.subscription_status === 'premium') return true;
-
-    // Free users check participant limit
     return currentCount < limits.participants.limit;
   }
 
@@ -93,25 +91,20 @@ class PremiumService {
   static async canCreateTemplate(userId) {
     const limits = await this.getUserLimits(userId);
     if (!limits) return false;
-
-    // Premium users have unlimited templates
     if (limits.subscription_status === 'premium') return true;
-
-    // Free users check template limit
     return limits.templates.remaining > 0;
   }
 
-  // Increment bill count for the month
+  // Increment bill count for the month (no longer needed with Prisma count, but kept for compatibility)
   static async incrementBillCount(userId) {
-    await runQuery(
-      'UPDATE users SET bills_created_this_month = bills_created_this_month + 1 WHERE id = ?',
-      [userId]
-    );
+    // No-op: bill count is calculated dynamically
+    return;
   }
 
-  // Reset monthly usage (should be called by a cron job)
+  // Reset monthly usage (no longer needed with Prisma count, but kept for compatibility)
   static async resetMonthlyUsage() {
-    await runQuery('UPDATE users SET bills_created_this_month = 0');
+    // No-op: bill count is calculated dynamically
+    return;
   }
 
   // Update user subscription
@@ -121,38 +114,26 @@ class PremiumService {
       plan,
       expiresAt,
       stripeCustomerId,
-      stripeSubscriptionId
+      stripeSubscriptionId,
     } = subscriptionData;
-
-    await runQuery(
-      `UPDATE users SET 
-        subscription_status = ?,
-        subscription_plan = ?,
-        subscription_expires_at = ?,
-        stripe_customer_id = ?,
-        stripe_subscription_id = ?,
-        bills_limit = ?,
-        participants_limit = ?,
-        templates_limit = ?
-       WHERE id = ?`,
-      [
-        status,
-        plan,
-        expiresAt,
-        stripeCustomerId,
-        stripeSubscriptionId,
-        status === 'premium' ? 999999 : 3, // Unlimited for premium
-        status === 'premium' ? 999999 : 5, // Unlimited for premium
-        status === 'premium' ? 999999 : 2, // Unlimited for premium
-        userId
-      ]
-    );
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        subscription_status: status,
+        subscription_plan: plan,
+        subscription_expires_at: expiresAt,
+        stripe_customer_id: stripeCustomerId,
+        stripe_subscription_id: stripeSubscriptionId,
+        bills_limit: status === 'premium' ? 999999 : 3,
+        participants_limit: status === 'premium' ? 999999 : 5,
+        templates_limit: status === 'premium' ? 999999 : 2,
+      },
+    });
   }
 
   // Get premium features available to user
   static async getAvailableFeatures(userId) {
     const isPremium = await this.isPremium(userId);
-    
     return {
       unlimited_bills: isPremium,
       unlimited_participants: isPremium,
@@ -162,16 +143,22 @@ class PremiumService {
       advanced_analytics: isPremium,
       export_formats: isPremium ? ['pdf', 'csv', 'excel'] : ['pdf'],
       priority_support: isPremium,
-      custom_branding: isPremium
+      custom_branding: isPremium,
     };
   }
 
   // Get user by Stripe customer ID (for webhook handlers)
   static async getUserByStripeCustomerId(stripeCustomerId) {
-    return await getQuery(
-      'SELECT id, email, name, subscription_status, subscription_plan FROM users WHERE stripe_customer_id = ?',
-      [stripeCustomerId]
-    );
+    return await prisma.user.findFirst({
+      where: { stripe_customer_id: stripeCustomerId },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        subscription_status: true,
+        subscription_plan: true,
+      },
+    });
   }
 }
 

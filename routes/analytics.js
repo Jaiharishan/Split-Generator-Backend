@@ -1,5 +1,5 @@
 const express = require('express');
-const { allQuery, getQuery } = require('../database');
+const prisma = require('../prismaClient');
 const { authenticateToken } = require('../middleware/auth');
 
 const router = express.Router();
@@ -11,14 +11,20 @@ router.use(authenticateToken);
 router.get('/overview', async (req, res) => {
   try {
     // Total spent and average bill
-    const bills = await allQuery('SELECT total_amount FROM bills WHERE user_id = ?', [req.user.id]);
+    const bills = await prisma.bill.findMany({
+      where: { user_id: req.user.id },
+      select: { total_amount: true },
+    });
     const totalSpent = bills.reduce((sum, b) => sum + (b.total_amount || 0), 0);
     const avgBill = bills.length > 0 ? totalSpent / bills.length : 0;
     // Active participants (unique across all bills)
-    const participants = await allQuery(
-      'SELECT DISTINCT name FROM participants WHERE bill_id IN (SELECT id FROM bills WHERE user_id = ?)',
-      [req.user.id]
-    );
+    const participants = await prisma.participant.findMany({
+      where: {
+        bill: { user_id: req.user.id },
+      },
+      select: { name: true },
+      distinct: ['name'],
+    });
     res.json({
       totalSpent,
       avgBill,
@@ -33,13 +39,21 @@ router.get('/overview', async (req, res) => {
 // 2. Spending Over Time (by month)
 router.get('/spending-over-time', async (req, res) => {
   try {
-    const rows = await allQuery(
-      `SELECT strftime('%Y-%m', created_at) as month, SUM(total_amount) as total
-       FROM bills WHERE user_id = ?
-       GROUP BY month ORDER BY month`,
-      [req.user.id]
-    );
-    res.json(rows.map(r => ({ month: r.month, total: Number(r.total) })));
+    const bills = await prisma.bill.findMany({
+      where: { user_id: req.user.id },
+      select: { total_amount: true, created_at: true },
+      orderBy: { created_at: 'asc' },
+    });
+    // Group by YYYY-MM
+    const monthlyTotals = {};
+    for (const bill of bills) {
+      const date = new Date(bill.created_at);
+      const month = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+      if (!monthlyTotals[month]) monthlyTotals[month] = 0;
+      monthlyTotals[month] += bill.total_amount || 0;
+    }
+    const result = Object.entries(monthlyTotals).map(([month, total]) => ({ month, total }));
+    res.json(result);
   } catch (error) {
     console.error('Analytics spending over time error:', error);
     res.status(500).json({ error: 'Failed to fetch spending over time' });
@@ -49,13 +63,21 @@ router.get('/spending-over-time', async (req, res) => {
 // 3. Bill Frequency (bills per month)
 router.get('/bill-frequency', async (req, res) => {
   try {
-    const rows = await allQuery(
-      `SELECT strftime('%Y-%m', created_at) as month, COUNT(*) as bills
-       FROM bills WHERE user_id = ?
-       GROUP BY month ORDER BY month`,
-      [req.user.id]
-    );
-    res.json(rows.map(r => ({ month: r.month, bills: Number(r.bills) })));
+    const bills = await prisma.bill.findMany({
+      where: { user_id: req.user.id },
+      select: { created_at: true },
+      orderBy: { created_at: 'asc' },
+    });
+    // Group by YYYY-MM
+    const monthlyCounts = {};
+    for (const bill of bills) {
+      const date = new Date(bill.created_at);
+      const month = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+      if (!monthlyCounts[month]) monthlyCounts[month] = 0;
+      monthlyCounts[month] += 1;
+    }
+    const result = Object.entries(monthlyCounts).map(([month, bills]) => ({ month, bills }));
+    res.json(result);
   } catch (error) {
     console.error('Analytics bill frequency error:', error);
     res.status(500).json({ error: 'Failed to fetch bill frequency' });
@@ -65,13 +87,16 @@ router.get('/bill-frequency', async (req, res) => {
 // 4. Top Participants (by count across all bills)
 router.get('/top-participants', async (req, res) => {
   try {
-    const rows = await allQuery(
-      `SELECT name, COUNT(*) as count
-       FROM participants WHERE bill_id IN (SELECT id FROM bills WHERE user_id = ?)
-       GROUP BY name ORDER BY count DESC LIMIT 10`,
-      [req.user.id]
-    );
-    res.json(rows.map(r => ({ id: r.name, value: Number(r.count) })));
+    const participants = await prisma.participant.groupBy({
+      by: ['name'],
+      where: {
+        bill: { user_id: req.user.id },
+      },
+      _count: { name: true },
+      orderBy: { _count: { name: 'desc' } },
+      take: 10,
+    });
+    res.json(participants.map(r => ({ id: r.name, value: r._count.name })));
   } catch (error) {
     console.error('Analytics top participants error:', error);
     res.status(500).json({ error: 'Failed to fetch top participants' });
@@ -81,13 +106,16 @@ router.get('/top-participants', async (req, res) => {
 // 5. Most Common Products (by name)
 router.get('/common-products', async (req, res) => {
   try {
-    const rows = await allQuery(
-      `SELECT name as product, COUNT(*) as count
-       FROM products WHERE bill_id IN (SELECT id FROM bills WHERE user_id = ?)
-       GROUP BY name ORDER BY count DESC LIMIT 10`,
-      [req.user.id]
-    );
-    res.json(rows.map(r => ({ product: r.product, count: Number(r.count) })));
+    const products = await prisma.product.groupBy({
+      by: ['name'],
+      where: {
+        bill: { user_id: req.user.id },
+      },
+      _count: { name: true },
+      orderBy: { _count: { name: 'desc' } },
+      take: 10,
+    });
+    res.json(products.map(r => ({ product: r.name, count: r._count.name })));
   } catch (error) {
     console.error('Analytics common products error:', error);
     res.status(500).json({ error: 'Failed to fetch common products' });
@@ -97,18 +125,32 @@ router.get('/common-products', async (req, res) => {
 // 6. Participant Owes/Paid (aggregate amount per participant)
 router.get('/participant-owes', async (req, res) => {
   try {
-    // For each participant, sum their share across all bills
-    const rows = await allQuery(
-      `SELECT p.name, COALESCE(SUM(pr.price * pr.quantity * pp.share_percentage / 100), 0) as amount
-       FROM participants p
-       LEFT JOIN product_participants pp ON p.id = pp.participant_id
-       LEFT JOIN products pr ON pp.product_id = pr.id
-       WHERE p.bill_id IN (SELECT id FROM bills WHERE user_id = ?)
-       GROUP BY p.name
-       ORDER BY amount DESC`,
-      [req.user.id]
-    );
-    res.json(rows.map(r => ({ participant: r.name, amount: Number(r.amount) })));
+    // Get all participants for user's bills
+    const participants = await prisma.participant.findMany({
+      where: {
+        bill: { user_id: req.user.id },
+      },
+      select: { id: true, name: true },
+    });
+    // For each participant, sum their share across all products
+    const result = [];
+    for (const participant of participants) {
+      // Get all product_participants for this participant
+      const productParticipants = await prisma.productParticipant.findMany({
+        where: { participant_id: participant.id },
+        include: { product: true },
+      });
+      const amount = productParticipants.reduce((sum, pp) => {
+        if (pp.product) {
+          return sum + (pp.product.price * pp.product.quantity * (pp.share_percentage || 0) / 100);
+        }
+        return sum;
+      }, 0);
+      result.push({ participant: participant.name, amount });
+    }
+    // Sort by amount descending
+    result.sort((a, b) => b.amount - a.amount);
+    res.json(result);
   } catch (error) {
     console.error('Analytics participant owes error:', error);
     res.status(500).json({ error: 'Failed to fetch participant owes' });
