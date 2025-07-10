@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const { runQuery, getQuery } = require('../database');
 const { generateToken } = require('../middleware/auth');
+const notificationService = require('../services/notificationService');
 
 const router = express.Router();
 
@@ -40,6 +41,14 @@ router.post('/register', async (req, res) => {
       'SELECT id, email, name, avatar_url, provider, created_at FROM users WHERE id = ?',
       [userId]
     );
+
+    // Send welcome email (non-blocking)
+    try {
+      await notificationService.sendWelcomeEmail(userId);
+    } catch (emailError) {
+      console.error('Failed to send welcome email:', emailError);
+      // Don't fail registration if email fails
+    }
 
     res.status(201).json({
       message: 'User registered successfully',

@@ -5,6 +5,7 @@ const uploadRoutes = require('./upload');
 const templateRoutes = require('./templates');
 const { router: premiumRoutes, webhookRouter } = require('./premium');
 const analyticsRoutes = require('./analytics');
+const notificationRoutes = require('./notifications');
 
 const router = express.Router();
 
@@ -15,6 +16,7 @@ router.use('/upload', uploadRoutes);
 router.use('/templates', templateRoutes);
 router.use('/premium', premiumRoutes);
 router.use('/analytics', analyticsRoutes);
+router.use('/notifications', notificationRoutes);
 
 // Export both the main router and the webhook router (for Stripe)
 module.exports = { router, webhookRouter }; 

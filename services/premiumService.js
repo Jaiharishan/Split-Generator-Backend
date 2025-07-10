@@ -165,6 +165,14 @@ class PremiumService {
       custom_branding: isPremium
     };
   }
+
+  // Get user by Stripe customer ID (for webhook handlers)
+  static async getUserByStripeCustomerId(stripeCustomerId) {
+    return await getQuery(
+      'SELECT id, email, name, subscription_status, subscription_plan FROM users WHERE stripe_customer_id = ?',
+      [stripeCustomerId]
+    );
+  }
 }
 
 module.exports = PremiumService; 

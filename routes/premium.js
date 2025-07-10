@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { authenticateToken } = require('../middleware/auth');
 const PremiumService = require('../services/premiumService');
+const { getQuery } = require('../database');
+const notificationService = require('../services/notificationService');
 
 // Stripe integration for premium checkout
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
@@ -38,15 +40,254 @@ webhookRouter.post('/webhook', expressRaw({ type: 'application/json' }), async (
             stripeSubscriptionId: session.subscription
           });
           console.log(`User ${userId} upgraded to premium via Stripe.`);
+          
+          // Send welcome to premium email
+          try {
+            await notificationService.sendSubscriptionUpgradedEmail(userId);
+          } catch (emailError) {
+            console.error('Failed to send premium welcome email:', emailError);
+          }
         } catch (err) {
           console.error('Failed to update user after Stripe checkout:', err);
         }
       }
       break;
     }
-    // TODO: Handle customer.subscription.updated, .deleted, etc.
+
+    case 'customer.subscription.updated': {
+      const subscription = event.data.object;
+      const customerId = subscription.customer;
+      
+      try {
+        // Find user by Stripe customer ID
+        const user = await PremiumService.getUserByStripeCustomerId(customerId);
+        if (!user) {
+          console.error(`No user found for Stripe customer ID: ${customerId}`);
+          break;
+        }
+
+        const subscriptionData = {
+          status: subscription.status === 'active' ? 'premium' : 'free',
+          plan: subscription.items.data[0]?.price?.recurring?.interval === 'year' ? 'yearly' : 'monthly',
+          expiresAt: new Date(subscription.current_period_end * 1000),
+          stripeCustomerId: customerId,
+          stripeSubscriptionId: subscription.id
+        };
+
+        await PremiumService.updateSubscription(user.id, subscriptionData);
+        console.log(`User ${user.id} subscription updated: ${subscription.status}`);
+      } catch (err) {
+        console.error('Failed to update subscription:', err);
+      }
+      break;
+    }
+
+    case 'customer.subscription.deleted': {
+      const subscription = event.data.object;
+      const customerId = subscription.customer;
+      
+      try {
+        // Find user by Stripe customer ID
+        const user = await PremiumService.getUserByStripeCustomerId(customerId);
+        if (!user) {
+          console.error(`No user found for Stripe customer ID: ${customerId}`);
+          break;
+        }
+
+        // Set subscription to expire at the end of current period
+        const subscriptionData = {
+          status: 'free',
+          plan: 'free',
+          expiresAt: new Date(subscription.current_period_end * 1000),
+          stripeCustomerId: customerId,
+          stripeSubscriptionId: subscription.id
+        };
+
+        await PremiumService.updateSubscription(user.id, subscriptionData);
+        console.log(`User ${user.id} subscription cancelled, expires: ${subscriptionData.expiresAt}`);
+        
+        // Send subscription cancelled email notification
+        try {
+          await notificationService.sendSubscriptionCancelledEmail(user.id, subscription.current_period_end * 1000);
+        } catch (emailError) {
+          console.error('Failed to send subscription cancelled email:', emailError);
+        }
+      } catch (err) {
+        console.error('Failed to handle subscription deletion:', err);
+      }
+      break;
+    }
+
+    case 'customer.subscription.trial_will_end': {
+      const subscription = event.data.object;
+      const customerId = subscription.customer;
+      
+      try {
+        const user = await PremiumService.getUserByStripeCustomerId(customerId);
+        if (!user) {
+          console.error(`No user found for Stripe customer ID: ${customerId}`);
+          break;
+        }
+
+        console.log(`Trial ending for user ${user.id} on ${new Date(subscription.trial_end * 1000)}`);
+        
+        // Send trial ending email notification
+        try {
+          await notificationService.sendTrialEndingEmail(user.id, subscription.trial_end);
+        } catch (emailError) {
+          console.error('Failed to send trial ending email:', emailError);
+        }
+      } catch (err) {
+        console.error('Failed to handle trial ending:', err);
+      }
+      break;
+    }
+
+    case 'invoice.payment_failed': {
+      const invoice = event.data.object;
+      const customerId = invoice.customer;
+      
+      try {
+        const user = await PremiumService.getUserByStripeCustomerId(customerId);
+        if (!user) {
+          console.error(`No user found for Stripe customer ID: ${customerId}`);
+          break;
+        }
+
+        console.log(`Payment failed for user ${user.id}, invoice: ${invoice.id}`);
+        
+        // Send payment failure email notification
+        try {
+          await notificationService.sendPaymentFailedEmail(user.id, invoice);
+        } catch (emailError) {
+          console.error('Failed to send payment failure email:', emailError);
+        }
+        
+        // Optionally update subscription status to reflect payment failure
+        // This depends on your business logic - some apps keep premium access
+        // for a grace period, others immediately revoke access
+        
+        // await PremiumService.updateSubscription(user.id, {
+        //   status: 'payment_failed',
+        //   plan: user.subscription_plan,
+        //   expiresAt: new Date(invoice.next_payment_attempt * 1000),
+        //   stripeCustomerId: customerId,
+        //   stripeSubscriptionId: invoice.subscription
+        // });
+      } catch (err) {
+        console.error('Failed to handle payment failure:', err);
+      }
+      break;
+    }
+
+    case 'invoice.payment_succeeded': {
+      const invoice = event.data.object;
+      const customerId = invoice.customer;
+      
+      try {
+        const user = await PremiumService.getUserByStripeCustomerId(customerId);
+        if (!user) {
+          console.error(`No user found for Stripe customer ID: ${customerId}`);
+          break;
+        }
+
+        console.log(`Payment succeeded for user ${user.id}, invoice: ${invoice.id}`);
+        
+        // Ensure subscription is active after successful payment
+        if (invoice.subscription) {
+          const subscription = await stripe.subscriptions.retrieve(invoice.subscription);
+          const subscriptionData = {
+            status: 'premium',
+            plan: subscription.items.data[0]?.price?.recurring?.interval === 'year' ? 'yearly' : 'monthly',
+            expiresAt: new Date(subscription.current_period_end * 1000),
+            stripeCustomerId: customerId,
+            stripeSubscriptionId: subscription.id
+          };
+
+          await PremiumService.updateSubscription(user.id, subscriptionData);
+        }
+      } catch (err) {
+        console.error('Failed to handle payment success:', err);
+      }
+      break;
+    }
+
+    case 'customer.subscription.created': {
+      const subscription = event.data.object;
+      const customerId = subscription.customer;
+      
+      try {
+        const user = await PremiumService.getUserByStripeCustomerId(customerId);
+        if (!user) {
+          console.error(`No user found for Stripe customer ID: ${customerId}`);
+          break;
+        }
+
+        const subscriptionData = {
+          status: subscription.status === 'active' ? 'premium' : 'free',
+          plan: subscription.items.data[0]?.price?.recurring?.interval === 'year' ? 'yearly' : 'monthly',
+          expiresAt: new Date(subscription.current_period_end * 1000),
+          stripeCustomerId: customerId,
+          stripeSubscriptionId: subscription.id
+        };
+
+        await PremiumService.updateSubscription(user.id, subscriptionData);
+        console.log(`New subscription created for user ${user.id}: ${subscription.status}`);
+      } catch (err) {
+        console.error('Failed to handle subscription creation:', err);
+      }
+      break;
+    }
+
+    case 'customer.subscription.paused': {
+      const subscription = event.data.object;
+      const customerId = subscription.customer;
+      
+      try {
+        const user = await PremiumService.getUserByStripeCustomerId(customerId);
+        if (!user) {
+          console.error(`No user found for Stripe customer ID: ${customerId}`);
+          break;
+        }
+
+        console.log(`Subscription paused for user ${user.id}`);
+        // Handle paused subscription - you might want to revoke access immediately
+        // or keep access until the pause period ends
+      } catch (err) {
+        console.error('Failed to handle subscription pause:', err);
+      }
+      break;
+    }
+
+    case 'customer.subscription.resumed': {
+      const subscription = event.data.object;
+      const customerId = subscription.customer;
+      
+      try {
+        const user = await PremiumService.getUserByStripeCustomerId(customerId);
+        if (!user) {
+          console.error(`No user found for Stripe customer ID: ${customerId}`);
+          break;
+        }
+
+        const subscriptionData = {
+          status: 'premium',
+          plan: subscription.items.data[0]?.price?.recurring?.interval === 'year' ? 'yearly' : 'monthly',
+          expiresAt: new Date(subscription.current_period_end * 1000),
+          stripeCustomerId: customerId,
+          stripeSubscriptionId: subscription.id
+        };
+
+        await PremiumService.updateSubscription(user.id, subscriptionData);
+        console.log(`Subscription resumed for user ${user.id}`);
+      } catch (err) {
+        console.error('Failed to handle subscription resume:', err);
+      }
+      break;
+    }
+
     default:
-      // Unhandled event type
+      console.log(`Unhandled event type: ${event.type}`);
       break;
   }
   res.json({ received: true });
@@ -146,23 +387,76 @@ router.post('/upgrade', authenticateToken, async (req, res) => {
 // Cancel premium subscription
 router.post('/cancel', authenticateToken, async (req, res) => {
   try {
-    const subscriptionData = {
-      status: 'free',
-      plan: 'free',
-      expiresAt: null,
-      stripeCustomerId: null,
-      stripeSubscriptionId: null
-    };
+    // Get user's current subscription info
+    const user = await getQuery(
+      'SELECT stripe_subscription_id, subscription_status FROM users WHERE id = ?',
+      [req.user.id]
+    );
 
-    await PremiumService.updateSubscription(req.user.id, subscriptionData);
+    if (!user || user.subscription_status !== 'premium') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No active premium subscription found' 
+      });
+    }
 
-    res.json({
-      success: true,
-      message: 'Premium subscription cancelled successfully',
-      data: {
-        subscription: subscriptionData
+    // If user has a Stripe subscription, cancel it at period end
+    if (user.stripe_subscription_id) {
+      try {
+        await stripe.subscriptions.update(user.stripe_subscription_id, {
+          cancel_at_period_end: true
+        });
+        
+        console.log(`Subscription ${user.stripe_subscription_id} marked for cancellation at period end`);
+        
+        res.json({
+          success: true,
+          message: 'Premium subscription will be cancelled at the end of your current billing period. You will continue to have access to premium features until then.',
+          data: {
+            cancelled_at_period_end: true
+          }
+        });
+      } catch (stripeError) {
+        console.error('Stripe cancellation error:', stripeError);
+        // Fall back to immediate cancellation if Stripe fails
+        const subscriptionData = {
+          status: 'free',
+          plan: 'free',
+          expiresAt: null,
+          stripeCustomerId: null,
+          stripeSubscriptionId: null
+        };
+
+        await PremiumService.updateSubscription(req.user.id, subscriptionData);
+
+        res.json({
+          success: true,
+          message: 'Premium subscription cancelled successfully',
+          data: {
+            subscription: subscriptionData
+          }
+        });
       }
-    });
+    } else {
+      // No Stripe subscription (manual/placeholder subscription), cancel immediately
+      const subscriptionData = {
+        status: 'free',
+        plan: 'free',
+        expiresAt: null,
+        stripeCustomerId: null,
+        stripeSubscriptionId: null
+      };
+
+      await PremiumService.updateSubscription(req.user.id, subscriptionData);
+
+      res.json({
+        success: true,
+        message: 'Premium subscription cancelled successfully',
+        data: {
+          subscription: subscriptionData
+        }
+      });
+    }
   } catch (error) {
     console.error('Error cancelling premium:', error);
     res.status(500).json({ success: false, message: 'Failed to cancel premium' });

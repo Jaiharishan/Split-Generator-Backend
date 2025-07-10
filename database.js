@@ -185,6 +185,19 @@ function initializeDatabase() {
         }
       });
 
+      // Add notification preferences (migration)
+      db.run('ALTER TABLE users ADD COLUMN email_notifications BOOLEAN DEFAULT TRUE', (err) => {
+        if (err && !err.message.includes('duplicate column name')) {
+          console.warn('Migration warning:', err.message);
+        }
+      });
+
+      db.run('ALTER TABLE users ADD COLUMN notification_preferences TEXT DEFAULT "{}"', (err) => {
+        if (err && !err.message.includes('duplicate column name')) {
+          console.warn('Migration warning:', err.message);
+        }
+      });
+
       db.run('ALTER TABLE users ADD COLUMN bills_created_this_month INTEGER DEFAULT 0', (err) => {
         if (err && !err.message.includes('duplicate column name')) {
           console.warn('Migration warning:', err.message);
